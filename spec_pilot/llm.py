@@ -4,7 +4,8 @@ import os
 import sys
 import time
 
-from openai import OpenAI, RateLimitError
+from openai import (APIConnectionError, APITimeoutError, BadRequestError,
+                    InternalServerError, OpenAI, RateLimitError)
 
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
@@ -29,11 +30,16 @@ def chat(messages, tools=None, temperature=0.2, retries=5):
     for attempt in range(retries):
         try:
             return client.chat.completions.create(**kwargs).choices[0].message
-        except RateLimitError:
+        except (RateLimitError, InternalServerError,
+                APIConnectionError, APITimeoutError) as e:
             wait = 5 * 2 ** attempt
-            log(f"rate limited, retrying in {wait}s")
+            log(f"{type(e).__name__}, retrying in {wait}s")
             time.sleep(wait)
+        except BadRequestError as e:
+            log(f"API rejected the request: {e.response.text}")
+            raise
     raise RuntimeError("still rate limited after retries")
+
 
 
 def run_agent(system, task, tools, handlers, max_steps=25):
@@ -45,16 +51,9 @@ def run_agent(system, task, tools, handlers, max_steps=25):
         if not msg.tool_calls:
             return msg.content or ""
 
-        messages.append({
-            "role": "assistant",
-            "content": msg.content,
-            "tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name,
-                              "arguments": tc.function.arguments}}
-                for tc in msg.tool_calls
-            ],
-        })
+        messages.append(msg.model_dump(exclude_none=True))
+        
+        
         for tc in msg.tool_calls:
             name, raw_args = tc.function.name, tc.function.arguments or "{}"
             try:
